@@ -45,8 +45,11 @@ langDef = emptyDef
             [ "Union"
             , "Intersection"
             , "Difference"
+            , "Subset"
             , "CartesianProduct"
             , "P"
+            , "Add"
+            , "Remove"
             , "True"
             , "False"
             ]
@@ -58,6 +61,8 @@ langDef = emptyDef
             , "\\"
             , "-"
             , "×"
+            , "⊂"
+            , "=="
             ]
           }
 
@@ -72,6 +77,8 @@ data Expression = Constant (Set.Set Integer)
                 | Difference Expression Expression
                 | CartesianProduct Expression Expression
                 | PowerSet Expression
+                | Equal Expression Expression
+                | Subset Expression Expression
                 | Function String [Expression]
                 deriving (Show)
 
@@ -89,7 +96,9 @@ table =
     , Infix (T.reservedOp lexer "∩" >> return Intersection) AssocLeft
     , Infix (T.reservedOp lexer "\\" >> return Difference) AssocLeft
     , Infix (T.reservedOp lexer "-" >> return Difference) AssocLeft
-    , Infix (T.reservedOp lexer "×" >> return CartesianProduct) AssocLeft ]
+    , Infix (T.reservedOp lexer "×" >> return CartesianProduct) AssocLeft
+    , Infix (T.reservedOp lexer "⊂" >> return Subset) AssocNone
+    , Infix (T.reservedOp lexer "==" >> return Equal) AssocNone ]
   ]
 
 parseTerm :: Parsec String () Expression
@@ -130,3 +139,5 @@ parseFunction = do
           <|> (try (T.reserved lexer "P") >> return "P")
           <|> (try (T.reserved lexer "CartesianProduct") >>
                return "CartesianProduct")
+          <|> (try (T.reserved lexer "Add") >> return "Add")
+          <|> (try (T.reserved lexer "Remove") >> return "Remove")
