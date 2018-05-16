@@ -21,6 +21,8 @@ description:         Please see the README on Github at <https://github.com/edga
 
 dependencies:
 - base >= 4.7 && < 5
+- parsec >= 3.1.13.0 && < 3.2
+- containers >= 0.5.10.2 && < 6
 
 library:
   source-dirs: src
