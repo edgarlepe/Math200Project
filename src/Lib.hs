@@ -13,16 +13,16 @@ module Lib
     , parseStatement
     ) where
 
-import           Data.Functor.Identity (Identity)
-import           Data.Map              as Map
-import qualified Data.Set              as Set
-import           Data.Set.Internal     (merge, Set(Tip), Set(Bin))
+import           Control.Monad.IO.Class (liftIO)
+import           Data.Functor.Identity  (Identity)
+import           Data.Map               as Map
+import           Data.Semigroup         (Semigroup (stimes, (<>)))
+import qualified Data.Set               as Set
+import           Data.Set.Internal      (Set (Tip), Set (Bin), merge)
 import           Text.Parsec
 import           Text.Parsec.Expr
-import           Text.Parsec.Language  (emptyDef)
-import qualified Text.Parsec.Token     as T
-import Data.Semigroup                  (Semigroup((<>), stimes))
-import Control.Monad.IO.Class          (liftIO)
+import           Text.Parsec.Language   (emptyDef)
+import qualified Text.Parsec.Token      as T
 
 -- | The Language Definition
 --   - No comments are allowed.
@@ -83,11 +83,9 @@ data Expression = Constant (Set.Set Integer)
                 | Difference Expression Expression
                 | CartesianProduct Expression Expression
                 | PowerSet Expression
+                | Equal Expression Expression
+                | Subset Expression Expression
                 deriving (Show)
-
-data BoolExpression = Equal Expression Expression
-                    | Subset Expression Expression
-                    deriving (Show)
 
 data Statement = Assignment String Expression
                | FunctionCall String [Expression]
@@ -116,6 +114,8 @@ table =
     , Infix (T.reservedOp lexer "∩" >> return Intersection) AssocLeft
     , Infix (T.reservedOp lexer "\\" >> return Difference) AssocLeft
     , Infix (T.reservedOp lexer "-" >> return Difference) AssocLeft
+    , Infix (T.reservedOp lexer "==" >> return Equal) AssocLeft
+    , Infix (T.reservedOp lexer "⊂" >> return Subset) AssocLeft
     ]
   ]
 
@@ -185,3 +185,13 @@ interpretCartesianProduct (CartesianProduct expr1 expr2) = do
 interpretPowerSet :: Expression -> Parser (Set (Set Integer))
 interpretPowerSet (PowerSet s) = interpretExpression s >>=
   return . Set.powerSet
+
+interpretBoolExpression :: Expression -> Parser Bool
+interpretBoolExpression (Equal expr1 expr2) = do
+  set1 <- interpretExpression expr1
+  set2 <- interpretExpression expr2
+  return $ set1 == set2
+interpretBoolExpression (Subset expr1 expr2) = do
+  set1 <- interpretExpression expr1
+  set2 <- interpretExpression expr2
+  return $ Set.isSubsetOf set1 set2
