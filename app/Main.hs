@@ -7,7 +7,17 @@ Portability :
 -}
 module Main where
 
-import Lib
+import           Lib
+import           Text.Parsec   (parse)
 
 main :: IO ()
-main = someFunc
+main = do
+  input <- getLine
+  case input of
+    "quit" -> return ()
+    _      -> putStrLn (interpret input) >> main
+
+interpret :: String -> String
+interpret s = case parse parseTerm "" s of
+                Left err  -> show err
+                Right val -> show val

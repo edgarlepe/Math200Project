@@ -1,22 +1,28 @@
+{-# LANGUAGE BangPatterns #-}
 {-|
 Module      : Lib
 Description : This module contains the library functions for the application
 Copyright   : (c) Edgar Giovanni Lepe, 2018
 License     : BSD3
 Portability :
+
+
 -}
 module Lib
     ( parseTerm
     , parseStatement
     ) where
 
-import Text.Parsec
-import Text.Parsec.Language (emptyDef)
-import qualified Text.Parsec.Token as T
-import Text.Parsec.Expr
-import qualified Data.Set as Set
-import Data.Functor.Identity (Identity)
-import Data.Map as Map
+import           Data.Functor.Identity (Identity)
+import           Data.Map              as Map
+import qualified Data.Set              as Set
+import           Data.Set.Internal     (merge, Set(Tip), Set(Bin))
+import           Text.Parsec
+import           Text.Parsec.Expr
+import           Text.Parsec.Language  (emptyDef)
+import qualified Text.Parsec.Token     as T
+import Data.Semigroup                  (Semigroup((<>), stimes))
+import Control.Monad.IO.Class          (liftIO)
 
 -- | The Language Definition
 --   - No comments are allowed.
@@ -31,7 +37,7 @@ import Data.Map as Map
 --       - \\ (Difference)
 --       - - (Difference)
 --       - × (Power Set)
-langDef :: T.LanguageDef ()
+langDef :: T.GenLanguageDef String UserState IO
 langDef = emptyDef
           { T.commentStart = ""
           , T.commentEnd = ""
@@ -67,7 +73,7 @@ langDef = emptyDef
           }
 
 -- | Creates a lexer using language definition
-lexer :: T.TokenParser ()
+lexer :: T.GenTokenParser String UserState IO
 lexer = T.makeTokenParser langDef
 
 data Expression = Constant (Set.Set Integer)
@@ -77,62 +83,70 @@ data Expression = Constant (Set.Set Integer)
                 | Difference Expression Expression
                 | CartesianProduct Expression Expression
                 | PowerSet Expression
-                | Equal Expression Expression
-                | Subset Expression Expression
-                | Function String [Expression]
                 deriving (Show)
 
+data BoolExpression = Equal Expression Expression
+                    | Subset Expression Expression
+                    deriving (Show)
+
 data Statement = Assignment String Expression
+               | FunctionCall String [Expression]
+               | Print Expression
                deriving (Show)
 
-type UserState = Map.Map String Expression
+type UserState = Map.Map String (Set.Set Integer)
 
-parseExpression :: Parsec String () Expression
-parseExpression = buildExpressionParser table parseTerm
+type Parser a = ParsecT String UserState IO a
 
-table :: OperatorTable String () Identity Expression
+parseExpression :: Parser Expression
+parseExpression = try parseOperator <|> try parseTerm <?> "Invalid Expression"
+
+parseStatement :: Parser Statement
+parseStatement = try parseFunction
+             <|> try parseFunction
+             <|> try parsePrint
+             <?> "Invalid Statement"
+
+parseOperator :: Parser Expression
+parseOperator = buildExpressionParser table parseTerm
+
+table :: OperatorTable String UserState IO Expression
 table =
   [ [ Infix (T.reservedOp lexer "∪" >> return Union) AssocLeft
     , Infix (T.reservedOp lexer "∩" >> return Intersection) AssocLeft
     , Infix (T.reservedOp lexer "\\" >> return Difference) AssocLeft
     , Infix (T.reservedOp lexer "-" >> return Difference) AssocLeft
-    , Infix (T.reservedOp lexer "×" >> return CartesianProduct) AssocLeft
-    , Infix (T.reservedOp lexer "⊂" >> return Subset) AssocNone
-    , Infix (T.reservedOp lexer "==" >> return Equal) AssocNone ]
+    ]
   ]
 
-parseTerm :: Parsec String () Expression
-parseTerm = try parseFunction
-        <|> parseIdentifier
+parseTerm :: Parser Expression
+parseTerm = parseIdentifier
         <|> parseConstant
 
-parseStatement :: Parsec String () Statement
-parseStatement = parseAssignment
-
-parseConstant :: Parsec String () Expression
+parseConstant :: Parser Expression
 parseConstant = do
   asList <- T.braces lexer $ T.commaSep lexer $ T.integer lexer
   return $ Constant $ Set.fromList asList
 
-parseIdentifier :: Parsec String () Expression
+parseIdentifier :: Parser Expression
 parseIdentifier = do
   identifier <- T.identifier lexer
   return $ Identifier identifier
 
-parseAssignment :: Parsec String () Statement
+parseAssignment :: Parser Statement
 parseAssignment = do
   identifier <- T.identifier lexer
   T.whiteSpace lexer
   T.reservedOp lexer "="
   T.whiteSpace lexer
-  expression <- parseExpression
+  expression <- parseOperator
   return $ Assignment identifier expression
 
-parseFunction :: Parsec String () Expression
+parseFunction :: Parser Statement
 parseFunction = do
   funcName <- matchFuncName
   args <- T.parens lexer $ T.commaSep1 lexer $ parseTerm
-  return $ Function funcName args
+  return $ FunctionCall funcName args
   where matchFuncName = (try (T.reserved lexer "Union") >> return "Union")
           <|> (try (T.reserved lexer "Intersection") >> return "Intersection")
           <|> (try (T.reserved lexer "Difference") >> return "Difference")
@@ -141,3 +155,33 @@ parseFunction = do
                return "CartesianProduct")
           <|> (try (T.reserved lexer "Add") >> return "Add")
           <|> (try (T.reserved lexer "Remove") >> return "Remove")
+
+interpretExpression :: Expression -> Parser (Set Integer)
+interpretExpression (Constant c) = return c
+interpretExpression (Identifier i) = do
+  st <- getState
+  case Map.lookup i st of
+    Nothing -> fail $ "Unknown identifier: " ++ i
+    Just v  -> return v
+interpretExpression (Union expr1 expr2) = do
+  set1 <- interpretExpression expr1
+  set2 <- interpretExpression expr2
+  return $ Set.union set1 set2
+interpretExpression (Intersection expr1 expr2) = do
+  set1 <- interpretExpression expr1
+  set2 <- interpretExpression expr2
+  return $ Set.intersection set1 set2
+interpretExpression (Difference expr1 expr2) = do
+  set1 <- interpretExpression expr1
+  set2 <- interpretExpression expr2
+  return $ Set.difference set1 set2
+
+interpretCartesianProduct :: Expression -> Parser (Set (Integer, Integer))
+interpretCartesianProduct (CartesianProduct expr1 expr2) = do
+  set1 <- interpretExpression expr1
+  set2 <- interpretExpression expr2
+  return $ Set.cartesianProduct set1 set2
+
+interpretPowerSet :: Expression -> Parser (Set (Set Integer))
+interpretPowerSet (PowerSet s) = interpretExpression s >>=
+  return . Set.powerSet
