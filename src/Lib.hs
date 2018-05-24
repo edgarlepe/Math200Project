@@ -1,30 +1,86 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds     #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-|
 Module      : Lib
-Description : This module contains the library functions for the application
+Description : This module contains data types, parsers, and interpreters for the
+              application.
 Copyright   : (c) Edgar Giovanni Lepe, 2018
 License     : BSD3
-Portability :
+Maintainer  : lepe.edgar10@gmail.com
 
 
 -}
 module Lib
-    ( parseTerm
-    , parseStatement
+    ( -- * Data Types
+      Parser
+    , UserState
+    , Val(..)
+    , Expr(..)
+    , Stmt(..)
+      -- * Parsers
+      -- ** Value parser
+    , parseVal
+      -- ** Expression Parser
+    , parseExpr
+    , simplifyExpression
+    , prettyPrintSet
+    , mainParser
     ) where
 
 import           Control.Monad.IO.Class (liftIO)
 import           Data.Functor.Identity  (Identity)
-import           Data.Map               as Map
-import           Data.Semigroup         (Semigroup (stimes, (<>)))
+import qualified Data.Map               as Map
 import qualified Data.Set               as Set
-import           Data.Set.Internal      (Set (Tip), Set (Bin), merge)
 import           Text.Parsec
 import           Text.Parsec.Expr
 import           Text.Parsec.Language   (emptyDef)
 import qualified Text.Parsec.Token      as T
+import qualified Data.List
+
+-- | A key value map of variable names to sets of values.
+type UserState = Map.Map String (Set.Set Val)
+
+-- | A parser with stream type of String, user state type of UserState,
+-- underlying monad of type Identity, and return type of a.
+type Parser a = ParsecT String UserState Identity a
+
+-- | Valid values for sets.
+data Val = Bool Bool
+         | Integer Integer
+         | Double Double
+         | Char Char
+         | String String
+         | Tuple (Val, Val)
+         | Set (Set.Set Val)
+         deriving (Eq, Ord)
+
+instance Show Val where
+  show (Bool b)      = show b
+  show (Integer i)   = show i
+  show (Double d)    = show d
+  show (Char c)      = show c
+  show (String s)    = s
+  show (Tuple (x,y)) = show (show x, show y)
+  show (Set s)       = prettyPrintSet s
+
+-- | Valid expressions.
+data Expr = Literal (Set.Set Val)
+          | Identifier String
+          | Union Expr Expr
+          | Difference Expr Expr
+          | Intersection Expr Expr
+          | CartesianProduct Expr Expr
+          deriving (Show, Eq)
+
+-- | Valid statements.
+data Stmt = Print (Set.Set Val) -- ^ Print statement
+          | Assignment String Expr -- ^ Assignment statement
+          | FuncCall String [Expr] -- ^ Function call
+          | MutateSet String Val Expr
+          deriving (Show)
 
 -- | The Language Definition
+--
 --   - No comments are allowed.
 --   - Identifiers start with a letter and can be followed by numbers, letters,
 --     and underscores.
@@ -37,7 +93,7 @@ import qualified Text.Parsec.Token      as T
 --       - \\ (Difference)
 --       - - (Difference)
 --       - × (Power Set)
-langDef :: T.GenLanguageDef String UserState IO
+langDef :: T.GenLanguageDef String UserState Identity
 langDef = emptyDef
           { T.commentStart = ""
           , T.commentEnd = ""
@@ -73,125 +129,233 @@ langDef = emptyDef
           }
 
 -- | Creates a lexer using language definition
-lexer :: T.GenTokenParser String UserState IO
+lexer :: T.GenTokenParser String UserState Identity
 lexer = T.makeTokenParser langDef
 
-data Expression = Constant (Set.Set Integer)
-                | Identifier String
-                | Union Expression Expression
-                | Intersection Expression Expression
-                | Difference Expression Expression
-                | CartesianProduct Expression Expression
-                | PowerSet Expression
-                | Equal Expression Expression
-                | Subset Expression Expression
-                deriving (Show)
+mainParser :: Parser (String, UserState)
+mainParser = do
+  res <- T.whiteSpace lexer >> parseStatement >>= interpretStatement
+  st <- getState
+  return $ (res, st)
 
-data Statement = Assignment String Expression
-               | FunctionCall String [Expression]
-               | Print Expression
-               deriving (Show)
+prettyPrintSet :: Show a => Set.Set a -> String
+prettyPrintSet s =
+  let asList = Set.toList s
+  in "{" ++ (Data.List.intercalate ", " $ map show asList) ++ "}"
 
-type UserState = Map.Map String (Set.Set Integer)
+prettyPrintStringSet :: Set.Set String -> String
+prettyPrintStringSet s =
+  let asList = Set.toList s
+  in "{" ++ (Data.List.intercalate "," asList) ++ "}"
 
-type Parser a = ParsecT String UserState IO a
 
-parseExpression :: Parser Expression
-parseExpression = try parseOperator <|> try parseTerm <?> "Invalid Expression"
+interpretStatement :: Stmt -> Parser String
+interpretStatement (Print v) = return $ prettyPrintSet v
+interpretStatement (Assignment var expr) = do
+  s <- simplifyExpression expr
+  st <- getState
+  if Map.member var st
+    then modifyState (\st' -> Map.insert var s $ Map.delete var st')
+    else modifyState (\st' -> Map.insert var s st')
+  return $ var ++ " = " ++ prettyPrintSet s
+interpretStatement (FuncCall funcName args) =
+  case funcName of
+    "Union" -> simplifyExpression (Union (args !! 0) (args !! 1)) >>=
+      return . prettyPrintSet
+    "Intersection" -> simplifyExpression (Intersection (args !! 0)
+                                                       (args !! 1)) >>=
+      return . prettyPrintSet
+    "Difference" -> simplifyExpression (Difference (args !! 0) (args !! 1)) >>=
+      return . prettyPrintSet
+    "P" -> do
+      s <- simplifyExpression (args !! 0)
+      let pSet = Set.map prettyPrintSet (Set.powerSet s)
+      return $ prettyPrintStringSet pSet
+    "Subset" -> do
+      s1 <- simplifyExpression (args !! 0)
+      s2 <- simplifyExpression (args !! 1)
+      return $ show (s1 `Set.isSubsetOf` s2)
+    "CartesianProduct" -> do
+      s1 <- simplifyExpression (args !! 0)
+      s2 <- simplifyExpression (args !! 1)
+      return . prettyPrintSet $ Set.cartesianProduct s1 s2
+    "Size" -> simplifyExpression (args !! 0) >>= return . show . Set.size
+interpretStatement (MutateSet op val expr) = do
+  case op of
+    "Add" -> case expr of
+               (Identifier i) -> do
+                 st <- getState
+                 case Map.lookup i st of
+                   (Just oldSet) -> do
+                     let newSet = Set.insert val oldSet
+                     modifyState (\x -> Map.insert i newSet $ Map.delete i x)
+                     return $ prettyPrintSet newSet
+                   Nothing -> fail $ "Unknown identifier " ++ i
+               _ -> do
+                 s <- simplifyExpression expr
+                 return $ prettyPrintSet (Set.insert val s)
+    "Remove" -> case expr of
+                  (Identifier i) -> do
+                    st <- getState
+                    case Map.lookup i st of
+                      (Just oldSet) -> do
+                        let newSet = Set.delete val oldSet
+                        modifyState (\x -> Map.insert i newSet $ Map.delete i x)
+                        return $ prettyPrintSet newSet
+                      Nothing -> fail $ "Unknown identifier " ++ i
+                  _ -> do
+                    s <- simplifyExpression expr
+                    return $ prettyPrintSet (Set.delete val s)
 
-parseStatement :: Parser Statement
-parseStatement = try parseFunction
-             <|> try parseFunction
-             <|> try parsePrint
-             <?> "Invalid Statement"
 
-parseOperator :: Parser Expression
-parseOperator = buildExpressionParser table parseTerm
+--------------------------------------------------------------------------------
+-- Statement Parsing
+--------------------------------------------------------------------------------
 
-table :: OperatorTable String UserState IO Expression
-table =
-  [ [ Infix (T.reservedOp lexer "∪" >> return Union) AssocLeft
-    , Infix (T.reservedOp lexer "∩" >> return Intersection) AssocLeft
-    , Infix (T.reservedOp lexer "\\" >> return Difference) AssocLeft
-    , Infix (T.reservedOp lexer "-" >> return Difference) AssocLeft
-    , Infix (T.reservedOp lexer "==" >> return Equal) AssocLeft
-    , Infix (T.reservedOp lexer "⊂" >> return Subset) AssocLeft
-    ]
-  ]
+parseStatement :: Parser Stmt
+parseStatement = try parseFunctionCall
+             <|> try parseMutateSet
+             <|> try parseAssignment
+             <|> parsePrint
 
-parseTerm :: Parser Expression
-parseTerm = parseIdentifier
-        <|> parseConstant
+parsePrint :: Parser Stmt
+parsePrint = parseExpr >>= simplifyExpression >>= return . Print
 
-parseConstant :: Parser Expression
-parseConstant = do
-  asList <- T.braces lexer $ T.commaSep lexer $ T.integer lexer
-  return $ Constant $ Set.fromList asList
+parseMutateSet :: Parser Stmt
+parseMutateSet = do
+  op <- try (T.reserved lexer "Add" >> return "Add") <|>
+        (T.reserved lexer "Remove" >> return "Remove")
+  T.symbol lexer "("
+  val <- parseVal
+  T.comma lexer
+  expr <- parseExpr
+  T.symbol lexer ")"
+  case op of
+    "Add" -> return $ MutateSet "Add" val expr
+    "Remove" -> return $ MutateSet "Remove" val expr
 
-parseIdentifier :: Parser Expression
-parseIdentifier = do
-  identifier <- T.identifier lexer
-  return $ Identifier identifier
+parseFunctionCall :: Parser Stmt
+parseFunctionCall = try parseSizeFunc <|> parseFunctionCall'
 
-parseAssignment :: Parser Statement
+parseSizeFunc :: Parser Stmt
+parseSizeFunc = do
+  arg <- between (T.symbol lexer "|") (T.symbol lexer "|") parseExpr
+  return $ FuncCall "Size" [arg]
+
+parseFunctionCall' :: Parser Stmt
+parseFunctionCall' = do
+  funcName <- parseFuncName
+  args <-  T.parens lexer $ T.commaSep1 lexer parseExpr
+  return $ FuncCall funcName args
+  where parseFuncName = try (T.reserved lexer "Union" >> return "Union")
+                    <|> try (T.reserved lexer "Intersection" >>
+                             return "Intersection")
+                    <|> try (T.reserved lexer "Difference" >>
+                             return "Difference")
+                    <|> try (T.reserved lexer "P" >> return"P")
+                    <|> try (T.reserved lexer "Subset" >> return "Subset")
+                    <|> try (T.reserved lexer "CartesianProduct" >>
+                             return "CartesianProduct")
+
+parseAssignment :: Parser Stmt
 parseAssignment = do
-  identifier <- T.identifier lexer
+  (Identifier ident) <- parseIdentifier
   T.whiteSpace lexer
   T.reservedOp lexer "="
   T.whiteSpace lexer
-  expression <- parseOperator
-  return $ Assignment identifier expression
+  v <- parseExpr
+  return $ Assignment ident v
 
-parseFunction :: Parser Statement
-parseFunction = do
-  funcName <- matchFuncName
-  args <- T.parens lexer $ T.commaSep1 lexer $ parseTerm
-  return $ FunctionCall funcName args
-  where matchFuncName = (try (T.reserved lexer "Union") >> return "Union")
-          <|> (try (T.reserved lexer "Intersection") >> return "Intersection")
-          <|> (try (T.reserved lexer "Difference") >> return "Difference")
-          <|> (try (T.reserved lexer "P") >> return "P")
-          <|> (try (T.reserved lexer "CartesianProduct") >>
-               return "CartesianProduct")
-          <|> (try (T.reserved lexer "Add") >> return "Add")
-          <|> (try (T.reserved lexer "Remove") >> return "Remove")
-
-interpretExpression :: Expression -> Parser (Set Integer)
-interpretExpression (Constant c) = return c
-interpretExpression (Identifier i) = do
+simplifyExpression :: Expr -> Parser (Set.Set Val)
+simplifyExpression (Literal s) = return s
+simplifyExpression (Identifier i) = do
   st <- getState
   case Map.lookup i st of
-    Nothing -> fail $ "Unknown identifier: " ++ i
-    Just v  -> return v
-interpretExpression (Union expr1 expr2) = do
-  set1 <- interpretExpression expr1
-  set2 <- interpretExpression expr2
-  return $ Set.union set1 set2
-interpretExpression (Intersection expr1 expr2) = do
-  set1 <- interpretExpression expr1
-  set2 <- interpretExpression expr2
-  return $ Set.intersection set1 set2
-interpretExpression (Difference expr1 expr2) = do
-  set1 <- interpretExpression expr1
-  set2 <- interpretExpression expr2
-  return $ Set.difference set1 set2
+    Just v -> return v
+    Nothing -> fail $ "Unknown identifier " ++ i
+simplifyExpression (Union e1 e2) = do
+  s1 <- simplifyExpression e1
+  s2 <- simplifyExpression e2
+  return $ Set.union s1 s2
+simplifyExpression (Intersection e1 e2) = do
+  s1 <- simplifyExpression e1
+  s2 <- simplifyExpression e2
+  return $ Set.intersection s1 s2
+simplifyExpression (Difference e1 e2) = do
+  s1 <- simplifyExpression e1
+  s2 <- simplifyExpression e2
+  return $ Set.difference s1 s2
+simplifyExpression (CartesianProduct e1 e2) = do
+  s1 <- simplifyExpression e1
+  s2 <- simplifyExpression e2
+  let asList = Set.toList $ Set.cartesianProduct s1 s2
+  return $ Set.fromList $ map Tuple asList
 
-interpretCartesianProduct :: Expression -> Parser (Set (Integer, Integer))
-interpretCartesianProduct (CartesianProduct expr1 expr2) = do
-  set1 <- interpretExpression expr1
-  set2 <- interpretExpression expr2
-  return $ Set.cartesianProduct set1 set2
+--------------------------------------------------------------------------------
+-- Expression Parsing
+--------------------------------------------------------------------------------
 
-interpretPowerSet :: Expression -> Parser (Set (Set Integer))
-interpretPowerSet (PowerSet s) = interpretExpression s >>=
-  return . Set.powerSet
+parseExpr :: Parser Expr
+parseExpr = buildExpressionParser table parseTerm
 
-interpretBoolExpression :: Expression -> Parser Bool
-interpretBoolExpression (Equal expr1 expr2) = do
-  set1 <- interpretExpression expr1
-  set2 <- interpretExpression expr2
-  return $ set1 == set2
-interpretBoolExpression (Subset expr1 expr2) = do
-  set1 <- interpretExpression expr1
-  set2 <- interpretExpression expr2
-  return $ Set.isSubsetOf set1 set2
+table = [ [ Infix (T.reservedOp lexer "∪" >> return Union) AssocLeft
+          , Infix (T.reservedOp lexer "∩" >> return Intersection) AssocLeft
+          , Infix ((try (T.reservedOp lexer "\\") <|> T.reservedOp lexer "-") >>
+                   return Difference) AssocLeft
+          , Infix (T.reservedOp lexer "×" >> return CartesianProduct) AssocLeft
+          ]
+        ]
+
+parseTerm :: Parser Expr
+parseTerm = try parseLiteral <|> parseIdentifier
+
+parseLiteral :: Parser Expr
+parseLiteral = do
+  (Set s) <- parseSet
+  return $ Literal s
+
+parseIdentifier :: Parser Expr
+parseIdentifier = T.identifier lexer >>= return . Identifier
+
+--------------------------------------------------------------------------------
+-- VAL Parsing
+--------------------------------------------------------------------------------
+
+parseVal :: Parser Val
+parseVal = try parseFloat
+        <|> try parseInteger
+        <|> try parseBool
+        <|> try parseChar
+        <|> try parseString
+        <|> try parseNTuple
+        <|> try parseSet
+
+parseSet :: Parser Val
+parseSet = do
+  s <- T.braces lexer $ T.commaSep lexer $ parseVal
+  return $ Set $ Set.fromList s
+
+parseNTuple :: Parser Val
+parseNTuple = do
+  (x:y:_) <- T.parens lexer $ T.commaSep1 lexer $ parseVal
+  return $ Tuple (x, y)
+
+parseBool :: Parser Val
+parseBool = do
+  result <- try (T.symbol lexer "True") <|> T.symbol lexer "False"
+  return $ Bool $ (read result :: Bool)
+
+parseString :: Parser Val
+parseString = T.stringLiteral lexer >>= return . String
+
+parseChar :: Parser Val
+parseChar = T.charLiteral lexer >>= return . Char
+
+parseNumber :: Parser Val
+parseNumber = try parseFloat <|> parseInteger
+
+parseInteger :: Parser Val
+parseInteger = T.integer lexer >>= return . Integer
+
+parseFloat :: Parser Val
+parseFloat = T.float lexer >>= return . Double
