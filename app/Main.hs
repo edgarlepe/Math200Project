@@ -3,34 +3,26 @@ Module      : Main
 Description : This module contains the application
 Copyright   : (c) Edgar Giovanni Lepe, 2018
 License     : BSD3
-Portability :
+Maintainer  : lepe.edgar10@gmail.com
+
 -}
 module Main where
 
+import qualified Data.Map  as Map
 import           Lib
-import           Text.Parsec   (runParser)
-import qualified Data.Map as Map
-import           System.IO (stdout, hFlush)
+import           System.IO (hFlush, stdout)
 
 main :: IO ()
-main = do
-  printPrompt
-  runInterpreter emptyState
+main = repl emptyState
   where emptyState = Map.empty
 
-runInterpreter userState = do
+repl userState = do
+  printPrompt
   input <- getLine
   case input of
     "quit" -> return ()
-    _ -> case runParser mainParser userState "" input of
-      (Right (output, newState)) -> do
-        putStrLn $ "=> " ++ output
-        printPrompt
-        runInterpreter newState
-      (Left err) -> do
-        print err
-        printPrompt
-        runInterpreter userState
-
-printPrompt :: IO ()
-printPrompt = putStr "RunInterpreter> " >> hFlush stdout
+    _ -> do
+      let (output, st) = interpret input userState
+      putStrLn $ "=> " ++ output
+      repl st
+  where printPrompt = putStr "Interpreter> " >> hFlush stdout

@@ -3,7 +3,7 @@ import qualified Data.Map
 import qualified Data.Set    as Set
 import           Lib
 import           Test.Hspec
-import           Text.Parsec (runParser)
+import           Text.Parsec (parse, runParser)
 
 main :: IO ()
 main = hspec $ do
@@ -48,4 +48,4 @@ main = hspec $ do
       parseTest parseExpr "a × b" `shouldBe`
         (Right (CartesianProduct (Identifier "a") (Identifier "b")))
 
-parseTest parser str = runParser parser (Data.Map.empty) "" str
+parseTest parser str = parse parser "" str
